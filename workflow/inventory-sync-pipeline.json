@@ -37,7 +37,7 @@
         "options": {}
       },
       "id": "webhook-sheets-update",
-      "name":Sheets Inventory Update Trigger",
+      "name": "Sheets Inventory Update Trigger",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [200, 900],

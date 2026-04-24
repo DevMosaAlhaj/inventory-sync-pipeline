@@ -1,25 +1,6 @@
-import { Component, OnInit, signal } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { Component, OnInit, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-
-interface InventoryItem {
-  sku: string;
-  productName: string;
-  currentStock: number;
-  reorderLevel: number;
-  lastUpdated: string;
-  status: 'healthy' | 'low' | 'out-of-stock';
-}
-
-interface SyncEvent {
-  id: string;
-  type: 'order_decrement' | 'sheets_sync' | 'shopify_update';
-  sku: string;
-  productName: string;
-  quantityChange: number;
-  timestamp: string;
-  source: 'shopify' | 'google-sheets';
-}
+import { InventoryService, InventoryItem, SyncEvent } from './services/inventory.service';
 
 @Component({
   selector: 'app-root',
@@ -28,53 +9,36 @@ interface SyncEvent {
   styleUrl: './app.scss'
 })
 export class App implements OnInit {
+  private inventoryService = inject(InventoryService);
+  readonly Math = Math;
+
   inventory = signal<InventoryItem[]>([]);
   syncEvents = signal<SyncEvent[]>([]);
   loading = signal(true);
-  lastSync = signal<string>('');
+  lastSync = signal('');
   totalSKUs = signal(0);
+  healthyCount = signal(0);
   lowStockCount = signal(0);
   outOfStockCount = signal(0);
   activeTab = signal<'inventory' | 'events'>('inventory');
 
-  private apiUrl = 'http://localhost:3000/api';
-
-  constructor(private http: HttpClient) {}
-
   ngOnInit(): void {
-    this.loadMockData();
-  }
+    this.inventoryService.getInventory().subscribe(items => {
+      this.inventory.set(items);
+      this.loading.set(false);
+    });
 
-  private loadMockData(): void {
-    const mockInventory: InventoryItem[] = [
-      { sku: 'SKU-1001', productName: 'Wireless Bluetooth Headphones', currentStock: 45, reorderLevel: 10, lastUpdated: new Date().toISOString(), status: 'healthy' },
-      { sku: 'SKU-1002', productName: 'USB-C Charging Cable (3ft)', currentStock: 8, reorderLevel: 15, lastUpdated: new Date().toISOString(), status: 'low' },
-      { sku: 'SKU-1003', productName: 'Laptop Stand - Adjustable', currentStock: 0, reorderLevel: 5, lastUpdated: new Date().toISOString(), status: 'out-of-stock' },
-      { sku: 'SKU-1004', productName: 'Mechanical Keyboard - RGB', currentStock: 32, reorderLevel: 10, lastUpdated: new Date().toISOString(), status: 'healthy' },
-      { sku: 'SKU-1005', productName: 'Wireless Mouse - Ergonomic', currentStock: 3, reorderLevel: 10, lastUpdated: new Date().toISOString(), status: 'low' },
-      { sku: 'SKU-1006', productName: 'Monitor Arm - Dual Mount', currentStock: 18, reorderLevel: 5, lastUpdated: new Date().toISOString(), status: 'healthy' },
-      { sku: 'SKU-1007', productName: 'Desk Pad - XXL (35x17in)', currentStock: 67, reorderLevel: 10, lastUpdated: new Date().toISOString(), status: 'healthy' },
-      { sku: 'SKU-1008', productName: 'Webcam HD 1080p', currentStock: 2, reorderLevel: 8, lastUpdated: new Date().toISOString(), status: 'low' },
-      { sku: 'SKU-1009', productName: 'Portable SSD 1TB', currentStock: 24, reorderLevel: 10, lastUpdated: new Date().toISOString(), status: 'healthy' },
-      { sku: 'SKU-1010', productName: 'USB Hub - 7 Port', currentStock: 0, reorderLevel: 5, lastUpdated: new Date().toISOString(), status: 'out-of-stock' },
-    ];
+    this.inventoryService.getSyncEvents().subscribe(events => {
+      this.syncEvents.set(events);
+    });
 
-    const now = new Date();
-    const mockEvents: SyncEvent[] = [
-      { id: '1', type: 'order_decrement', sku: 'SKU-1001', productName: 'Wireless Bluetooth Headphones', quantityChange: -2, timestamp: new Date(now.getTime() - 300000).toISOString(), source: 'shopify' },
-      { id: '2', type: 'sheets_sync', sku: 'SKU-1004', productName: 'Mechanical Keyboard - RGB', quantityChange: 10, timestamp: new Date(now.getTime() - 900000).toISOString(), source: 'google-sheets' },
-      { id: '3', type: 'order_decrement', sku: 'SKU-1002', productName: 'USB-C Charging Cable (3ft)', quantityChange: -5, timestamp: new Date(now.getTime() - 1800000).toISOString(), source: 'shopify' },
-      { id: '4', type: 'shopify_update', sku: 'SKU-1005', productName: 'Wireless Mouse - Ergonomic', quantityChange: 20, timestamp: new Date(now.getTime() - 3600000).toISOString(), source: 'google-sheets' },
-      { id: '5', type: 'order_decrement', sku: 'SKU-1008', productName: 'Webcam HD 1080p', quantityChange: -3, timestamp: new Date(now.getTime() - 5400000).toISOString(), source: 'shopify' },
-    ];
-
-    this.inventory.set(mockInventory);
-    this.syncEvents.set(mockEvents);
-    this.lastSync.set(new Date().toISOString());
-    this.totalSKUs.set(mockInventory.length);
-    this.lowStockCount.set(mockInventory.filter(i => i.status === 'low').length);
-    this.outOfStockCount.set(mockInventory.filter(i => i.status === 'out-of-stock').length);
-    this.loading.set(false);
+    this.inventoryService.getStats().subscribe(stats => {
+      this.totalSKUs.set(stats.total);
+      this.healthyCount.set(stats.healthy);
+      this.lowStockCount.set(stats.low);
+      this.outOfStockCount.set(stats.outOfStock);
+      this.lastSync.set(stats.lastSync);
+    });
   }
 
   getStatusClass(status: string): string {
@@ -105,8 +69,17 @@ export class App implements OnInit {
   }
 
   formatTime(timestamp: string): string {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  formatTimeAgo(timestamp: string): string {
+    const diff = Date.now() - new Date(timestamp).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
   }
 
   setTab(tab: 'inventory' | 'events'): void {
