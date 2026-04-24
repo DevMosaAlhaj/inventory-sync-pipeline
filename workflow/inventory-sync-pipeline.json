@@ -1,0 +1,508 @@
+{
+  "name": "E-Commerce Inventory Sync Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shopify-order-created",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-order-created",
+      "name": "Shopify Order Created",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "shopify-order-created"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shopify-product-updated",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-product-updated",
+      "name": "Shopify Product Updated",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 600],
+      "webhookId": "shopify-product-updated"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sheets-inventory-update",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-sheets-update",
+      "name":Sheets Inventory Update Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 900],
+      "webhookId": "sheets-inventory-update"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract order line items and map to SKU + quantity changes\nconst order = $input.first().json;\nconst lineItems = order.line_items || [];\n\nconst results = lineItems.map(item => ({\n  sku: item.sku || `SKU-${item.product_id}`,\n  productName: item.title,\n  quantityChange: -item.quantity, // negative because orders decrement stock\n  orderId: order.id,\n  orderNumber: order.order_number,\n  reason: 'order_placed',\n  timestamp: new Date().toISOString()\n}));\n\nreturn results.map(item => ({ json: item }));"
+      },
+      "id": "transform-order",
+      "name": "Transform Order Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract product update data\nconst product = $input.first().json;\nconst variants = product.variants || [];\n\nconst results = variants.map(variant => ({\n  sku: variant.sku || `SKU-${variant.id}`,\n  productName: product.title,\n  newStock: variant.inventory_quantity,\n  reason: 'shopify_update',\n  timestamp: new Date().toISOString()\n}));\n\nreturn results.map(item => ({ json: item }));"
+      },
+      "id": "transform-product",
+      "name": "Transform Product Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transform sheets update for Shopify sync\nconst update = $input.first().json;\n\nreturn [{\n  json: {\n    sku: update.sku,\n    newStock: parseInt(update.currentStock, 10),\n    reason: 'sheets_update',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "transform-sheets",
+      "name": "Transform Sheets Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 900]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": "Inventory",
+        "filters": {
+          "conditions": [
+            {
+              "key": "SKU",
+              "condition": "equal",
+              "value": "={{ $json.sku }}"
+            }
+          ]
+        }
+      },
+      "id": "lookup-sku-in-sheets",
+      "name": "Lookup SKU in Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [750, 300],
+      "credentials": {
+        "googleSheetsApi": {
+          "id": "GOOGLE_SHEETS_CREDENTIALS_ID",
+          "name": "Google Sheets API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": "Inventory",
+        "options": {}
+      },
+      "id": "update-sheets-stock",
+      "name": "Update Sheets Stock",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1050, 300],
+      "credentials": {
+        "googleSheetsApi": {
+          "id": "GOOGLE_SHEETS_CREDENTIALS_ID",
+          "name": "Google Sheets API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "low-stock-check",
+              "leftValue": "={{ $json['Current Stock'] }}",
+              "rightValue": "={{ $env.REORDER_THRESHOLD || 5 }}",
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-low-stock",
+      "name": "Check Low Stock",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#inventory-alerts",
+        "text": "=⚠️ *Low Stock Alert*\n\n*Product:* {{ $json['Product Name'] }}\n*SKU:* {{ $json['SKU'] }}\n*Current Stock:* {{ $json['Current Stock'] }}\n*Reorder Level:* {{ $env.REORDER_THRESHOLD || 5 }}\n\n_Timestamp: {{ $now.format('yyyy-MM-dd HH:mm:ss') }}_",
+        "otherOptions": {}
+      },
+      "id": "slack-low-stock-alert",
+      "name": "Slack Low Stock Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1550, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "SLACK_CREDENTIALS_ID",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $env.SHOPIFY_SHOP_DOMAIN }}/admin/api/2024-01/products.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "shopifyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Shopify-Access-Token",
+              "value": "={{ $env.SHOPIFY_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "shopify-lookup-by-sku",
+      "name": "Shopify Lookup by SKU",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [750, 900],
+      "credentials": {
+        "shopifyApi": {
+          "id": "SHOPIFY_CREDENTIALS_ID",
+          "name": "Shopify API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $env.SHOPIFY_SHOP_DOMAIN }}/admin/api/2024-01/inventory_levels/set.json",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "shopifyApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"location_id\": \"{{ $env.SHOPIFY_LOCATION_ID }}\",\n  \"inventory_item_id\": \"{{ $json.inventoryItemId }}\",\n  \"available\": {{ $json.newStock }}\n}",
+        "options": {}
+      },
+      "id": "update-shopify-stock",
+      "name": "Update Shopify Stock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1050, 900]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 18 * * *"
+            }
+          ]
+        }
+      },
+      "id": "daily-summary-trigger",
+      "name": "Daily Summary Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 1200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": "Inventory",
+        "options": {}
+      },
+      "id": "get-all-inventory",
+      "name": "Get All Inventory",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [500, 1200],
+      "credentials": {
+        "googleSheetsApi": {
+          "id": "GOOGLE_SHEETS_CREDENTIALS_ID",
+          "name": "Google Sheets API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate daily summary report\nconst items = $input.all().map(item => item.json);\nconst lowStockItems = items.filter(item => parseInt(item['Current Stock']) <= (parseInt(item['Reorder Level']) || 5));\nconst totalSKUs = items.length;\nconst outOfStock = items.filter(item => parseInt(item['Current Stock']) === 0).length;\n\nconst summary = {\n  date: new Date().toISOString().split('T')[0],\n  totalSKUs,\n  outOfStock,\n  lowStockCount: lowStockItems.length,\n  lowStockItems: lowStockItems.map(item => `- ${item['Product Name']} (${item['SKU']}): ${item['Current Stock']} units`).join('\\n')\n};\n\nreturn [{ json: summary }];"
+      },
+      "id": "generate-summary",
+      "name": "Generate Summary Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 1200]
+    },
+    {
+      "parameters": {
+        "channel": "#inventory-reports",
+        "text": "=📊 *Daily Inventory Summary — {{ $json.date }}*\n\n*Total SKUs:* {{ $json.totalSKUs }}\n*Out of Stock:* {{ $json.outOfStock }}\n*Low Stock Items:* {{ $json.lowStockCount }}\n\n{{ $json.lowStockItems }}\n\n_Next report tomorrow at 6:00 PM_",
+        "otherOptions": {}
+      },
+      "id": "slack-daily-summary",
+      "name": "Send Daily Summary",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1100, 1200],
+      "credentials": {
+        "slackApi": {
+          "id": "SLACK_CREDENTIALS_ID",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Webhook received' }) }}",
+        "options": {}
+      },
+      "id": "respond-order-webhook",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Product update received' }) }}",
+        "options": {}
+      },
+      "id": "respond-product-webhook",
+      "name": "Respond OK (Product)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Sheets update forwarded to Shopify' }) }}",
+        "options": {}
+      },
+      "id": "respond-sheets-webhook",
+      "name": "Respond OK (Sheets)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1300, 900]
+    }
+  ],
+  "connections": {
+    "Shopify Order Created": {
+      "main": [
+        [
+          {
+            "node": "Transform Order Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify Product Updated": {
+      "main": [
+        [
+          {
+            "node": "Transform Product Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets Inventory Update Trigger": {
+      "main": [
+        [
+          {
+            "node": "Transform Sheets Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Order Data": {
+      "main": [
+        [
+          {
+            "node": "Lookup SKU in Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Product Data": {
+      "main": [
+        [
+          {
+            "node": "Lookup SKU in Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond OK (Product)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Sheets Data": {
+      "main": [
+        [
+          {
+            "node": "Shopify Lookup by SKU",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup SKU in Sheets": {
+      "main": [
+        [
+          {
+            "node": "Update Sheets Stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Sheets Stock": {
+      "main": [
+        [
+          {
+            "node": "Check Low Stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Low Stock": {
+      "main": [
+        [
+          {
+            "node": "Slack Low Stock Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Shopify Lookup by SKU": {
+      "main": [
+        [
+          {
+            "node": "Update Shopify Stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Shopify Stock": {
+      "main": [
+        [
+          {
+            "node": "Respond OK (Sheets)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Summary Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get All Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Inventory": {
+      "main": [
+        [
+          {
+            "node": "Generate Summary Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Summary Report": {
+      "main": [
+        [
+          {
+            "node": "Send Daily Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "inventory-sync"
+    },
+    {
+      "name": "shopify"
+    },
+    {
+      "name": "google-sheets"
+    }
+  ]
+}
