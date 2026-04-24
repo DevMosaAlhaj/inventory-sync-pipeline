@@ -1,0 +1,13 @@
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inventory-dashboard
+    restart: unless-stopped
+    networks:
+      - apps-network
+
+networks:
+  apps-network:
+    external: true
